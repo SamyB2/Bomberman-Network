@@ -7,27 +7,14 @@ Direction *init_dir(int x, int y) {
   return dir;
 }
 
+Direction directions[] = {{0, -1}, {1, 0},  {0, 1},  {-1, 0},
+                          {1, 1},  {-1, 1}, {1, -1}, {-1, -1}};
+
 Direction *dir_of(int dir) {
-  switch (dir) {
-  case 0:
-    return init_dir(0, -1);
-  case 1:
-    return init_dir(1, 0);
-  case 2:
-    return init_dir(0, 1);
-  case 3:
-    return init_dir(-1, 0);
-  case 4:
-    return init_dir(1, 1);
-  case 5:
-    return init_dir(-1, 1);
-  case 6:
-    return init_dir(1, -1);
-  case 7:
-    return init_dir(-1, -1);
-  default:
+  if (dir < 0 || dir >= 8) {
     return NULL;
   }
+  return &directions[dir];
 }
 
 void free_dir(void *dir) { free(dir); }

@@ -1,8 +1,9 @@
 #include "../include/chat.h"
 
+// Create a new chat with a maximum of 5 messages 
 Chat *create_chat() {
   Chat *c = malloc(sizeof(Chat));
-  c->messages = init_dequeue();
+  c->messages = init_deque();
   c->nb_messages = 0;
   c->max_messages = 5;
   c->destination = 0;
@@ -14,11 +15,12 @@ Chat *create_chat() {
 }
 
 void free_chat(Chat *c) {
-  free_dequeue(c->messages, free);
+  free_deque(c->messages, free);
   free(c->current_message);
   free(c);
 }
 
+// Add a message to the chat
 void add_message(Chat *c, char *message) {
   if (c->nb_messages == c->max_messages) {
     Node *n = pop_front(c->messages); 
@@ -30,6 +32,7 @@ void add_message(Chat *c, char *message) {
   c->nb_messages++;
 }
 
+// Add a character to the current message
 void add_char(Line *current_message, int c) {
   if (current_message->cursor < TEXT_SIZE) {
     current_message->data[current_message->cursor] = (char)c;
@@ -38,6 +41,7 @@ void add_char(Line *current_message, int c) {
   }
 }
 
+// Remove a character from the current message
 void remove_char(Line *current_message) {
   if (current_message->cursor > 0) {
     current_message->cursor--;

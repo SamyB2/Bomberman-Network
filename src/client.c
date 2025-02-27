@@ -1,6 +1,10 @@
 #include "../include/client.h"
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
 
-int connect_to_tcp(const char *server_url, uint16_t server_port, int* sockfd) {
+int connect_to_tcp(const char *server_url, uint16_t server_port, int *sockfd) {
   struct addrinfo hints, *res;
   char port_str[6];
 
@@ -26,6 +30,7 @@ int connect_to_tcp(const char *server_url, uint16_t server_port, int* sockfd) {
     return ERROR_SOCKET_CREATION;
   }
 
+  // Connect to the server
   int attempts = 0;
   while (connect(*sockfd, res->ai_addr, res->ai_addrlen) < 0) {
     if (++attempts == MAX_ATTEMPTS) {
@@ -38,10 +43,11 @@ int connect_to_tcp(const char *server_url, uint16_t server_port, int* sockfd) {
   }
 
   freeaddrinfo(res);
-  return ERROR_NONE;
+  return SUCCESS;
 }
 
-int create_socket_udp(uint16_t portudp, int* sock_udp, struct sockaddr_in6* addr_udp_) {
+int create_socket_udp(uint16_t portudp, int *sock_udp,
+                      struct sockaddr_in6 *addr_udp_) {
   struct sockaddr_in6 addr_udp;
   int sockfd = socket(AF_INET6, SOCK_DGRAM, 0);
   if (sockfd < 0) {
@@ -72,44 +78,28 @@ int create_socket_udp(uint16_t portudp, int* sock_udp, struct sockaddr_in6* addr
 
   *sock_udp = sockfd;
   memcpy(addr_udp_, &addr_udp, sizeof(addr_udp));
-  return ERROR_NONE;
+  return SUCCESS;
 }
 
 int join_game_rq(int sockfd, int gamemode) {
-  uint16_t header_id = header_id_request((gamemode == 1)? 1 : 2, 0, 0);
+  uint16_t header_id = header_id_request((gamemode == 1) ? 1 : 2, 0, 0);
   return send_header_rq(sockfd, header_id);
 }
 
-int get_game_info(int sockfd, int* id, int* eq, uint16_t* port_udp,
-                                    uint16_t* port_mdiff, char* adrm_diff) {
+int get_game_info(int sockfd, int *id, int *eq, uint16_t *port_udp,
+                  uint16_t *port_mdiff, char *adrm_diff) {
   char buffer[BUFFER_SIZE];
+  ssize_t rd = 0;
   uint32_t adrm_diff_[4] = {0};
   size_t data_sz = sizeof(uint16_t) * 3 + 4 * sizeof(uint32_t);
-  struct timeval timeout;
-  timeout.tv_sec = 10;
-  timeout.tv_usec = 0;
+  rd = read_message(sockfd, NULL, buffer, data_sz, 0);
 
-  if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout,
-                 sizeof(timeout)) < 0) {
-    perror("setsockopt failed\n");
-    return ERROR_SOCKET_CREATION;
-  }
-
-  // Receive message from server
-  ssize_t n = recv(sockfd, buffer, data_sz, 0);
-  ssize_t total_bytes = n;
-  while (n > 0 && total_bytes < (ssize_t)data_sz) {
-    n = recv(sockfd, buffer + total_bytes, data_sz - (size_t)total_bytes, 0);
-    total_bytes += n;
-  }
-
-  if (n < 0) {
+  if (rd < 0) {
     perror("Error reading response");
     return ERROR_READING_RESPONSE;
   }
 
-  if (total_bytes < (ssize_t)data_sz) {
-    fprintf(stderr, "Error: Incomplete message\n");
+  if (rd < (ssize_t)data_sz) {
     return ERROR_READING_RESPONSE;
   }
 
@@ -128,11 +118,11 @@ int get_game_info(int sockfd, int* id, int* eq, uint16_t* port_udp,
     adrm_diff_[i] = ntohl(adrm_diff_[i]);
   }
   memcpy(adrm_diff, adrm_diff_, 4 * sizeof(uint32_t));
-  return ERROR_NONE;
+  return SUCCESS;
 }
 
 int join_multicast_group(const char *multicast_ip, uint16_t multicast_port,
-                                  int* sockfd_,  struct sockaddr_in6* addr_) {
+                         int *sockfd_, struct sockaddr_in6 *addr_) {
   struct sockaddr_in6 addr;
   struct ipv6_mreq mreq;
   int sockfd;
@@ -172,7 +162,6 @@ int join_multicast_group(const char *multicast_ip, uint16_t multicast_port,
   }
   mreq.ipv6mr_interface = 0;
 
-  printf("setsockopt(IPV6_JOIN_GROUP)\n");
   if (setsockopt(sockfd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) <
       0) {
     perror("setsockopt(IPV6_JOIN_GROUP) failed");
@@ -181,145 +170,180 @@ int join_multicast_group(const char *multicast_ip, uint16_t multicast_port,
   }
   *sockfd_ = sockfd;
   memcpy(addr_, &addr, sizeof(addr));
-  return ERROR_NONE;
+  return SUCCESS;
 }
 
-int send_header_rq (int sockfd, uint16_t header_id) {
-  char* joining_req = malloc(sizeof(uint16_t));
+// Function to send a header request to the server
+int send_header_rq(int sockfd, uint16_t header_id) {
+  char *joining_req = malloc(sizeof(uint16_t));
   memcpy(joining_req, &header_id, sizeof(uint16_t));
 
   // Send joining request
   ssize_t bytes_sent = send(sockfd, joining_req, sizeof(uint16_t), 0);
   while (bytes_sent < (ssize_t)sizeof(uint16_t)) {
-    bytes_sent += send(sockfd, joining_req + bytes_sent, sizeof(uint16_t) - (size_t)bytes_sent, 0);
+    bytes_sent += send(sockfd, joining_req + bytes_sent,
+                       sizeof(uint16_t) - (size_t)bytes_sent, 0);
   }
   free(joining_req);
-  return ERROR_NONE;
+  return SUCCESS;
 }
 
-int join_game(int sock_tcp, Server_info* serv_info, Header_info* header_info) {
+// Function to send a message to the server when the client join the game
+int join_game(int sock_tcp, Server_info *serv_info, Header_info *header_info) {
   int error_code;
   uint16_t port_udp = 0;
   uint16_t port_mdiff = 0;
-  char* adrm_diff = malloc(4 * sizeof(uint32_t));
-
-  error_code = get_game_info(sock_tcp, &(header_info->id), &(header_info->eq),
-                     &port_udp, &port_mdiff, adrm_diff);
-
-  if (error_code == ERROR_NONE) {
-    printf("Game info received\n");
-    printf("ID: %d\n", header_info->id);
-    printf("Equipe: %d\n", header_info->eq);
-    printf("UDP port: %u\n", port_udp);
-    printf("Multicast port: %u\n", port_mdiff);
-    printf("Multicast address: %s\n", adrm_diff);
-  } else return error_code;
+  char *adrm_diff = malloc(4 * sizeof(uint32_t));
+  do {
+    error_code = get_game_info(sock_tcp, &(header_info->id), &(header_info->eq),
+                               &port_udp, &port_mdiff, adrm_diff);
+  } while (error_code != SUCCESS);
   
-  error_code = join_multicast_group(adrm_diff, port_mdiff, &(serv_info->sock_mdff),
-                                    &(serv_info->addr_mdff));
+  printf("Game is starting\n");
 
-  if (error_code == ERROR_NONE) {
-    printf("Joined multicast group\n");
-  } else return error_code;
+  error_code = join_multicast_group(
+      adrm_diff, port_mdiff, &(serv_info->sock_mdff), &(serv_info->addr_mdff));
+
+  if (error_code != SUCCESS)
+    return error_code;
 
   error_code = create_socket_udp(port_udp, &(serv_info->sock_udp),
-                                     &(serv_info->addr_udp));
-  if (error_code == ERROR_NONE) {
-    printf("UDP socket created\n");
-  } else return error_code;
+                                 &(serv_info->addr_udp));
+  if (error_code != SUCCESS)
+    return error_code;
 
-  return ERROR_NONE;
+  return SUCCESS;
 }
 
-int read_message(int sock_udp, struct sockaddr_in6* addr, char* buffer, size_t size, size_t size_mess) {
-  struct timeval timeout;
-  timeout.tv_sec = 0;
-  timeout.tv_usec = 250;
-
-  if (setsockopt(sock_udp, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout,
-                 sizeof(timeout)) < 0) {
-    return ERROR_SOCKET_OPTIONS;
-  }
-
-  socklen_t addr_len = sizeof(struct sockaddr_in6);
-  ssize_t n = recvfrom(sock_udp, buffer, size, 0, (struct sockaddr *)addr, &addr_len);
-  ssize_t total_bytes = n;
-  while (n > 0 && total_bytes < (ssize_t)size_mess) {
-    n = recvfrom(sock_udp, buffer + total_bytes, size_mess - (size_t)total_bytes, 0, (struct sockaddr *)addr, &addr_len);
-    total_bytes += n;
-  }
-
-  if (n < 0) return ERROR_READING_RESPONSE;
-
-  if (total_bytes < (ssize_t)size_mess) return ERROR_INCOMPLETE_RESPONSE;
-
-  return ERROR_NONE;
-}
-
-void byte_to_board (char* cells, Board* board) {
+// Functio to incode de board 
+void byte_to_board(char *cells, Board *board) {
   size_t index = 0;
-  for (int i = 0 ; i < board->w * board->h ; i++){
+  char cells_mapping[] = {PATH, WALL, D_WALL, 'A', 'B', 'C',
+                          'D', 0, 1 , 2 , 3};
+
+  for (int i = 0; i < board->w * board->h; i++) {
     uint8_t cell;
     memcpy(&cell, cells + index, sizeof(uint8_t));
     index += sizeof(uint8_t);
-    switch (cell){
-      case 0:
-        board->grid[i] = PATH;
-        break;
-      case 1:
-        board->grid[i] = WALL;
-        break;
-      case 2:
-        board->grid[i] = D_WALL;
-        break;
-      case 3:
-        board->grid[i] = 'A';
-        break;
-      case 4:
-        board->grid[i] = 'B';
-        break;
-      case 5:
-        board->grid[i] = 'C';
-        break;
-      case 6:
-        board->grid[i] = 'D';
-        break;
-      case 7:
-        board->grid[i] = '0';
-        break;
-      case 8:
-        board->grid[i] = '1';
-        break;
-      case 9:
-        board->grid[i] = '2';
-        break;
-      case 10:
-        board->grid[i] = '3';
-        break;
+
+    if (cell < 11) {
+      board->grid[i] = cells_mapping[cell];
     }
   }
 }
 
-int send_meessage(int sock_udp, struct sockaddr_in6* addr, char* buffer, size_t size) {
-  ssize_t bytes_sent = sendto(sock_udp, buffer, size, 0, (struct sockaddr *)addr, sizeof(*addr));
-  while (bytes_sent < (ssize_t)size) {
-    bytes_sent += sendto(sock_udp, buffer + bytes_sent, size - (size_t)bytes_sent, 0, (struct sockaddr *)addr, sizeof(*addr));
+// Function to extract the changed cells from the buffer
+void extract_changed_cells(char *buffer, Board *board) {
+  memcpy(&(board->changed_cells_count), buffer, sizeof(uint8_t));
+  int nb_cells = (int)board->changed_cells_count;
+  char *cells_data = buffer + sizeof(uint8_t);
+  size_t len_cell = sizeof(uint8_t) * 3;
+  for (int i = 0; i < nb_cells; ++i) {
+    uint8_t x, y, value;
+    memcpy(&x, cells_data + (size_t)i * len_cell, sizeof(uint8_t));
+    memcpy(&y, cells_data + (size_t)i * len_cell + sizeof(uint8_t),
+           sizeof(uint8_t));
+    memcpy(&value, cells_data + (size_t)i * len_cell + 2 * sizeof(uint8_t),
+           sizeof(uint8_t));
+    set_grid_cell(board, (int)x, (int)y, (char)value);
   }
-  return ERROR_NONE;
+}
+// return 1 if there is an update, 0 otherwise
+int update_board_check(int sock_mdff, struct sockaddr_in6 *addr_mdff,
+                       Board *board, uint16_t *num_rq_rd, int get_dim) {
+  char buffer[BUFFER_SIZE];
+  // reading message from multicast
+  ssize_t rd = read_message(sock_mdff, addr_mdff, buffer, BUFFER_SIZE, 1);
+  // check if we got header and number of message
+  if (rd < (ssize_t)sizeof(uint16_t) * 2){
+    return 0;
+  }
+  else rd -= (ssize_t)sizeof(uint16_t) * 2;
+  // decode header and number of message
+  uint16_t header_id;
+  uint16_t num;
+  Header_info hd_info;
+  memcpy(&header_id, buffer, sizeof(uint16_t));
+  header_id = ntohs(header_id);
+  memcpy(&num, buffer + sizeof(uint16_t), sizeof(uint16_t));
+  num = ntohs(num);
+  // get the dimension of the board
+  if (get_dim) {
+    uint8_t w, h;
+    memcpy(&h, buffer + sizeof(uint16_t) * 2, sizeof(uint8_t));
+    memcpy(&w, buffer + sizeof(uint16_t) * 2 + sizeof(uint8_t),
+           sizeof(uint8_t));
+    board->w = (int)w;
+    board->h = (int)h;
+  }
+  if (num < 5 && *num_rq_rd >= 0xffff - 5) {
+    *num_rq_rd = 0;
+  }
+  // check if we got the latest message
+  if (num >= *num_rq_rd) {
+    *num_rq_rd = num % 0xffff;
+    // decode header
+    header_id_decode(header_id, &hd_info.code_req, &hd_info.id, &hd_info.eq);
+    // the message is the full grid
+    if (hd_info.code_req == 11 &&
+        rd >= (ssize_t)(sizeof(uint16_t) +
+                        sizeof(uint8_t) * (size_t)(board->w * board->h)))
+      byte_to_board(buffer + sizeof(uint16_t) * 3, board);
+    else if (hd_info.code_req == 12 && rd >= (ssize_t)sizeof(uint8_t))
+      extract_changed_cells(buffer + sizeof(uint16_t) * 2, board);
+    else
+      return 0;
+    }else return 0;
+  return 1;
 }
 
-void extract_changed_cells(char* buffer, Board* board) {
-    memcpy(&(board->changed_cells_count), buffer, sizeof(uint8_t));
-    int nb_cells = (int) board->changed_cells_count;
-    char* cells_data = buffer + sizeof(uint8_t);
-    size_t len_cell = sizeof(uint8_t) * 3;
-    for (int i = 0; i < nb_cells; ++i) {
-        uint8_t x , y , value;
-        memcpy(&x, cells_data + (size_t) i * len_cell, sizeof(uint8_t));
-        memcpy(&y, cells_data + (size_t) i * len_cell + sizeof(uint8_t), sizeof(uint8_t));
-        memcpy(&value, cells_data + (size_t) i * len_cell + 2 * sizeof(uint8_t), sizeof(uint8_t));
-        set_grid_cell(board, (int) x , (int) y , (char)value);
-    }
+// Function to update the chat with the message received from the server
+int update_chat_check(int sock_tcp, char *buffer, int *alive, Chat *chat,
+                      int *id_winner, int *eq_winner) {
+  ssize_t rd = read_message(sock_tcp, NULL, buffer, BUFFER_SIZE, 0);
+  if (rd < (ssize_t)sizeof(uint16_t))
+    return 0;
+  else
+    rd -= (ssize_t)sizeof(uint16_t);
+
+  // decode message
+  uint16_t header_id;
+  Header_info hd_info;
+  memcpy(&header_id, buffer, sizeof(uint16_t));
+  header_id = ntohs(header_id);
+  header_id_decode(header_id, &hd_info.code_req, &hd_info.id, &hd_info.eq);
+
+  char *dst[2] = {"[All] : ", "[TEAM] : "};
+  size_t dst_len[2] = {8, 9};
+
+  switch (hd_info.code_req) {
+  case 13:
+  case 14:
+    if (rd < (ssize_t)(sizeof(uint8_t))) return 0;
+    uint8_t size_mess;
+    memcpy(&size_mess, buffer + sizeof(uint16_t), sizeof(uint8_t));
+    char *message = calloc(size_mess + 10, sizeof(char));
+    int index = (hd_info.code_req == 13) ? 0 : 1;
+    memcpy(message, dst[index], dst_len[index]);
+    memcpy(message + dst_len[index],
+           buffer + sizeof(uint16_t) + sizeof(uint8_t), size_mess*sizeof(char));
+    add_message(chat, message);
+    break;
+
+  case 15:
+  case 16:
+    *id_winner = hd_info.id;
+    *eq_winner = hd_info.eq;
+    // do things
+    return 2;
+  case 17:
+    *alive = 0;
+    return 0;
+
+  default:
+    return 0;
+  }
+  return 1;
 }
 
 int main(int argc, char *argv[]) {
@@ -337,18 +361,17 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Usage : 1 for Free-For-All 2 for 2vs2\n");
     return 1;
   }
-  
+
   // game utils
-  Board* board = malloc(sizeof(Board));
+  Board *board = malloc(sizeof(Board));
   setup_board(board);
-  Chat* chat = create_chat();
+  Chat *chat = create_chat();
 
   // connecting to the server by TCP
   int sock_tcp;
   int error_code = connect_to_tcp(url, port, &sock_tcp);
-  if (error_code == ERROR_NONE) {
-    printf("Connected to server\n");
-  } else goto error_message;
+  if (error_code != SUCCESS)
+    goto error_message;
   Header_info header_info;
   Server_info serv_info;
 
@@ -356,114 +379,86 @@ int main(int argc, char *argv[]) {
   join_game_rq(sock_tcp, gamemode);
   // joining the game
   error_code = join_game(sock_tcp, &serv_info, &header_info);
-  if (error_code != ERROR_NONE) {
+  if (error_code != SUCCESS) {
     close(sock_tcp);
     goto error_message;
   }
 
   // send a message to the server to say that we are ready to play
-  error_code = send_header_rq(sock_tcp, 
-                      header_id_request(3, header_info.id, header_info.eq));
+  error_code = send_header_rq(
+      sock_tcp, header_id_request((gamemode == 1) ? 3 : 4, header_info.id,
+                                  header_info.eq));
 
   struct timeval timeout;
   timeout.tv_sec = 0;
-  timeout.tv_usec = 500;
+  timeout.tv_usec = 40;
 
   int num_rq_wr = 0;
   uint16_t num_rq_rd = 0;
   int alive = 1;
-  // int id_winner = -1;
-  // int eq_winner = -1;
+  int id_winner = -1;
+  int eq_winner = -1;
+  setup_view();
+  int ret = 0;
+  // get the first full grid
+  do { 
+    ret = update_board_check(serv_info.sock_mdff, &serv_info.addr_mdff, board,
+                     &num_rq_rd, 0);
+    usleep(40);
+  }while(!ret);
+  refresh_board(board);
+  refresh_line(chat->current_message, chat->prompt,
+               board->h + 2 + chat->max_messages);
 
-  while(1) {
+  while (1) {
     fd_set readfds;
     FD_ZERO(&readfds);
     FD_SET(serv_info.sock_mdff, &readfds);
     FD_SET(sock_tcp, &readfds);
 
-    int max_fd = (serv_info.sock_mdff > sock_tcp) ? serv_info.sock_mdff : sock_tcp;
+    int max_fd =
+        (serv_info.sock_mdff > sock_tcp) ? serv_info.sock_mdff : sock_tcp;
     int activity = select(max_fd + 1, &readfds, NULL, NULL, &timeout);
-    /* TODO : ALEX */
     if (activity < 0) {
       error_code = ERROR_SYSTEM;
       goto clean_space;
     }
 
-    if (!activity) goto game_control;
+    if (!activity)
+      goto game_control;
 
+    // get full grid or differential grid
     if (FD_ISSET(serv_info.sock_mdff, &readfds)) {
-      char buffer[BUFFER_SIZE];
-      struct sockaddr_in6 addr;
-      int mess = read_message(serv_info.sock_mdff, &addr, buffer, BUFFER_SIZE, BUFFER_SIZE);
-      if (mess == ERROR_NONE) {
-        // decode message
-        uint16_t header_id;
-        uint16_t num;
-        Header_info hd_info;
-        memcpy(&header_id, buffer, sizeof(uint16_t));
-        header_id = ntohs(header_id);
-        memcpy(&num, buffer + sizeof(uint16_t), sizeof(uint16_t));
-        num = ntohs(num);
-        if (num < 5 && num_rq_rd >= 0xffff - 5) {
-          num_rq_rd = 0;
-        }
-        if (num >= num_rq_rd){
-          num_rq_rd = num % 0xffff ;
-          header_id_decode(header_id, &hd_info.code_req, &hd_info.id, &hd_info.eq);
-          if (hd_info.code_req == 11) {
-            // maj the full grid
-            byte_to_board(buffer+sizeof(uint16_t) *3 , board);
-          }else{
-            if (hd_info.code_req == 12) {
-            extract_changed_cells(buffer+sizeof(uint16_t)*2 , board);
-            }
-          }
-        }
-      }
+      if (update_board_check(serv_info.sock_mdff, &serv_info.addr_mdff, board,
+                             &num_rq_rd, 0))
+        refresh_board(board);
     }
 
+    // get chat message
     if (FD_ISSET(sock_tcp, &readfds)) {
       char buffer[BUFFER_SIZE];
-      struct sockaddr_in6 addr;
-      int mess = read_message(sock_tcp, &addr, buffer, BUFFER_SIZE, BUFFER_SIZE);
-      if (mess == ERROR_NONE) {
-        // decode message
-        uint16_t header_id;
-        Header_info hd_info;
-        memcpy(&header_id, buffer, sizeof(uint16_t));
-        header_id = ntohs(header_id);
-        header_id_decode(header_id, &hd_info.code_req, &hd_info.id, &hd_info.eq);
-        char *dst[2] = {"[All] : ", "[Mate] : "};
-        size_t dst_len[2] = {8, 9};
-        if (hd_info.code_req == 13 || hd_info.code_req == 14) {
-          // chat message
-          uint8_t size_mess;
-          memcpy(&size_mess, buffer + sizeof(uint16_t), sizeof(uint8_t));
-          char* message = calloc(size_mess + 10, 0);
-          int index = (hd_info.code_req == 13) ? 0 : 1;
-          memcpy(message, dst[index], dst_len[index]);
-          memcpy(message + dst_len[index], buffer + sizeof(uint16_t) + sizeof(uint8_t), size_mess);
-          add_message(chat, message);
-        }else if (hd_info.code_req == 18){
-          alive = 0;
-        }else{
-          // id_winner = hd_info.id;
-          // eq_winner = hd_info.eq;
-          break;
-        }
+      int res = update_chat_check(sock_tcp, buffer, &alive, chat, &id_winner,
+                                  &eq_winner);
+      if (res == 2) {
+        goto clean_space;
       }
-      
+      if (res)
+        refresh_chat(chat, board->h + 2);
     }
 
-    refresh_game(board, chat);
-    /* TODO : SAMI */
     // get action from player
     ACTION action;
   game_control:
     action = control(chat, gamemode);
     if (action == QUIT) break;
-    
-    if (action == NONE) continue;
+
+    if (action == NONE) goto sleeep;
+
+    if (action == REFRESH) {
+      refresh_line(chat->current_message, chat->prompt,
+                   board->h + 2 + chat->max_messages);
+      goto sleeep;
+    }
 
     fd_set writefds;
     FD_ZERO(&writefds);
@@ -477,36 +472,48 @@ int main(int argc, char *argv[]) {
       error_code = ERROR_SYSTEM;
       goto clean_space;
     }
-    
-    if (!activity) continue;
 
+    if (!activity) goto sleeep;
+
+    // send action request to server
     if (FD_ISSET(serv_info.sock_udp, &writefds) && action != SEND && alive) {
       // send action request to server
-      uint32_t action_id = action_request(5, header_info.id, header_info.eq, num_rq_wr, action);
-      char* action_req = malloc(sizeof(uint32_t));
+      uint32_t action_id =
+          action_request(5, header_info.id, header_info.eq, num_rq_wr, action);
+      char *action_req = malloc(sizeof(uint32_t));
       memcpy(action_req, &action_id, sizeof(uint32_t));
-      send_meessage(serv_info.sock_udp, &(serv_info.addr_udp), action_req, sizeof(uint32_t));
-      num_rq_wr = (num_rq_wr + 1) % 0xffff;
+      send_meessage(serv_info.sock_udp, &(serv_info.addr_udp), action_req,
+                    sizeof(uint32_t), 1);
+      num_rq_wr = (num_rq_wr + 1) % 0x1fff;
       free(action_req);
+      continue;
     }
 
+    // send chat message to server
     if (FD_ISSET(sock_tcp, &writefds)) {
       // send chat message to server
       int destination = (chat->destination == 0) ? 7 : 8;
-      char* chat_req = tchat_request(destination, header_info.id, header_info.eq, TEXT_SIZE, chat->current_message->data);
-      size_t total_bytes = sizeof(chat_req);
-      ssize_t bytes_sent = send(sock_tcp, chat_req, total_bytes, 0);
-      while (bytes_sent < (ssize_t)total_bytes) {
-        bytes_sent += send(sock_tcp, chat_req + bytes_sent, total_bytes - (size_t)bytes_sent, 0);
-      }
-      Line* line = chat->current_message;
-      clear_line(line);
+      char *chat_req = tchat_request(
+          destination, header_info.id, header_info.eq,
+          chat->current_message->cursor, chat->current_message->data);
+      size_t total_bytes = sizeof(uint8_t) + sizeof(uint16_t) + chat->current_message->cursor*sizeof(char);
+      ssize_t wr = send_meessage(sock_tcp, NULL, chat_req, total_bytes, 0);
+      if (wr < 0) goto clean_space;
+      clear_line(chat->current_message);
+      refresh_line(chat->current_message, chat->prompt,
+                   board->h + 2 + chat->max_messages);
+      refresh_line(chat->current_message, chat->prompt,
+                   board->h + 2 + chat->max_messages);
       free(chat_req);
     }
-    
+  sleeep:
+    usleep(40);
   }
 
+
 clean_space:
+  printf("winner is %d from team %d\n", id_winner, eq_winner);
+  printf("Game Over\n");
   free_board(board);
   free_chat(chat);
   close(sock_tcp);
@@ -514,7 +521,7 @@ clean_space:
   close(serv_info.sock_udp);
   curs_set(1);
   endwin();
-  error_message:
-    fprintf(stderr, "Error: %s\n", ERROR_MESSAGES[error_code]);
-    return error_code;
+error_message:
+  fprintf(stderr, "Error: %s\n", ERROR_MESSAGES[error_code]);
+  return error_code;
 }

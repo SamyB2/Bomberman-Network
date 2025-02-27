@@ -1,7 +1,7 @@
 #ifndef CHAT_H
 #define CHAT_H
 
-#include "../include/dequeue.h"
+#include "../include/deque.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -16,7 +16,7 @@ typedef struct Line
 
 typedef struct Chat
 {
-    Dequeue *messages;     // game messages
+    Deque *messages;     // game messages
     int nb_messages;       // number of messages
     int max_messages;      // maximum number of messages
     int destination;       // 0 for ALL, 1 for TEAM

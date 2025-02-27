@@ -53,9 +53,9 @@ void refresh_board(Board *b) {
       default:
         break;
       }
-      attron(COLOR_PAIR(color)); // Enable custom color 4
+      attron(COLOR_PAIR(color)); // Enable custom color 
       mvaddch(y + 1, x + 1, (chtype)c);
-      attroff(COLOR_PAIR(color)); // Disable custom color 4
+      attroff(COLOR_PAIR(color)); // Disable custom color 
     }
   }
   for (x = 0; x < b->w + 2; x++) {
@@ -92,7 +92,7 @@ void refresh_chat(Chat *c, int pos) {
 void refresh_line(Line *l, const char* prompt, int pos) {
   attron(A_BOLD); // Enable bold
   attron(COLOR_PAIR(1)); // Enable custom color 1
-  mvprintw(pos, 0, "%s %s", prompt, l->data);
+  mvprintw(pos, 0, "%s%s", prompt, l->data);
   size_t len = strlen(l->data) + strlen(prompt);
   for (size_t j = len; j < TEXT_SIZE; j++) {
     mvprintw(pos, (int)j, " ");

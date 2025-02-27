@@ -1,56 +1,41 @@
 #include "../include/udp.h"
+#include "../include/format.h"
 
-int create_socket() {
-  int sockfd = socket(AF_INET6, SOCK_DGRAM, 0);
-  if (sockfd < 0) {
-    perror("Socket creation failed");
-    exit(EXIT_FAILURE);
-  }
-  return sockfd;
-}
 
-struct sockaddr_in6 create_address(char *ip, int port) {
-  struct sockaddr_in6 addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin6_family = AF_INET6;
-  inet_pton(AF_INET6, ip, &(addr.sin6_addr));
-  addr.sin6_port = htons((short unsigned int)port);
-  addr.sin6_scope_id = 0;
-  return addr;
-}
+// function to start the udp server
+void start_udp_servers(uint16_t udp_port, uint16_t multicast_port, Server_info* server_info) {
+  int udp_socket, multicast_socket;
+  struct sockaddr_in6 servaddr;
 
-void send_message(int sockfd, struct sockaddr_in6 addr, char *message) {
-  if (sendto(sockfd, message, strlen(message), 0, (struct sockaddr *)&addr,
-             sizeof(addr)) < 0) {
-    perror("Sending message failed");
-    exit(EXIT_FAILURE);
-  }
-}
+  udp_socket = socket(PF_INET6, SOCK_DGRAM, 0);
+  server_info->sock_udp = udp_socket;
+  multicast_socket = socket(PF_INET6, SOCK_DGRAM, 0);
+  server_info->sock_mdff = multicast_socket;
 
-void start_server(char *ip, int port, char *message) {
-  int sockfd = create_socket();
-  struct sockaddr_in6 addr = create_address(ip, port);
 
-  printf("Server started. Players can subscribe to multicast group %s on "
-         "port %d\n",
-         ip, port);
-
-  for (int i = 0; i < 10; i++) {
-    send_message(sockfd, addr, message);
-    sleep(5);
+  if (udp_socket < 0 || multicast_socket < 0) {
+    perror("socket");
+    exit(1);
   }
 
-  close(sockfd);
-}
+  if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
+    perror("setsockopt");
+    exit(1);
+  }
 
-void *start_udp_server(void *arg) {
-  char **argv = (char **)arg;
-  char *ip = argv[0];
-  int port = atoi(argv[1]);
-  printf("Starting server on %s:%d\n", ip, port);
-  char *message = "Server Connection successful!";
+  memset(&servaddr, 0, sizeof(servaddr));
+  servaddr.sin6_family = AF_INET6;
+  servaddr.sin6_addr = in6addr_any;
+  servaddr.sin6_port = htons(udp_port);
 
-  start_server(ip, port, message);
-
-  exit(EXIT_SUCCESS);
+  if (bind(udp_socket, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
+    perror("bind udp");
+  }
+ 
+  memset(&server_info->addr_mdff, 0, sizeof(server_info->addr_mdff));
+  server_info->addr_mdff.sin6_family = AF_INET6;
+  inet_pton(AF_INET6, MULTICAST_IP, &server_info->addr_mdff.sin6_addr);
+  server_info->addr_mdff.sin6_port = htons(multicast_port);
+  server_info->addr_mdff.sin6_scope_id = 0;
+  //server_info->addr_mdff.sin6_scope_id = if_nametoindex("wlp2s0");
 }

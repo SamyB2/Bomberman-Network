@@ -1,240 +1,557 @@
 #include "../include/server.h"
-#include "../include/udp.h"
-#include "../include/format.h"
 
+Deque *ffa, *team;
 
-void send_udp_server_info(int new_socket) {
-  // Create UDP server
-  int udp_server_port = 54321; // Choose an appropriate port
-  char *udp_multicast_group =
-      "ff02::1"; // Choose an appropriate multicast group
+// Mutexes for game modes
+pthread_mutex_t ffa_count_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t team_count_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-  // Convert udp_server_port to string
-  char udp_server_port_str[6];
-  sprintf(udp_server_port_str, "%d", udp_server_port);
+// Mutexes for queues
+pthread_mutex_t ffa_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t team_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-  // Start UDP server in a new thread
-  pthread_t udp_server_thread;
-  char *argv[] = {udp_multicast_group, udp_server_port_str, NULL};
-  if (pthread_create(&udp_server_thread, NULL, start_udp_server, argv) != 0) {
-    perror("could not create UDP server thread");
+pthread_mutex_t port_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Counters for game modes
+int ffa_count = 0;
+int team_count = 0;
+
+uint16_t udp_var = 5000;
+
+int check_connection_to_client(ClientInfo *client[]) {
+  char buffer[1];
+  int count = 0;
+  for (int i = 0; i < MAX_PLAYERS; i++) {
+    ssize_t result = recv(client[i]->socket, buffer, sizeof(buffer),
+                          MSG_PEEK | MSG_DONTWAIT);
+    if (result == 0) {
+      close(client[i]->socket);
+      client[i] = NULL;
+    } else {
+      count++;
+    }
+  }
+  return count;
+}
+
+// Process the queue of clients and create the structure for the different client
+void process_queue(Deque *queue, pthread_mutex_t *queue_mutex,
+                   pthread_mutex_t *count_mutex, int *count, int gamemode) {
+  pthread_mutex_lock(queue_mutex);
+  pthread_mutex_lock(count_mutex);
+
+  if (*count < MAX_PLAYERS) {
+    pthread_mutex_unlock(count_mutex);
+    pthread_mutex_unlock(queue_mutex);
     return;
   }
-  pthread_detach(udp_server_thread);
 
-  // Send UDP server info to the client
-  char udp_server_info[256];
-  sprintf(udp_server_info, "%s %d", udp_multicast_group, udp_server_port);
-  if (send(new_socket, udp_server_info, strlen(udp_server_info), 0) <
-      (ssize_t)strlen(udp_server_info)) {
-    perror("send failed");
+  ClientInfo *client[MAX_PLAYERS];
+  populate_clients(queue, client);
+
+  int check = check_connection_to_client(client);
+
+  if (check < MAX_PLAYERS) {
+    push_clients_back_to_queue(queue, client);
   } else {
-    printf("UDP server info sent\n");
+    process_clients(client, gamemode);
+    *count -= 4;
+  }
+
+  pthread_mutex_unlock(count_mutex);
+  pthread_mutex_unlock(queue_mutex);
+}
+
+// function to populate the client array
+void populate_clients(Deque *queue, ClientInfo *client[]) {
+  for (int i = 0; i < MAX_PLAYERS; i++) {
+    Node *nd = pop_front(queue);
+    client[i] = (ClientInfo *)nd->data;
+    free(nd);
   }
 }
 
-void handle_client_message(int new_socket) {
-  char buffer[BUFFER_SIZE] = {0};
-  if (read(new_socket, buffer, BUFFER_SIZE) < 0) {
-    perror("read failed");
-  } else {
-    printf("Client message: %s\n", buffer);
-    send_udp_server_info(new_socket);
-  }
-}
-
-void *handle_client(void *arg) {
-  int new_socket = *((int *)arg);
-  free(arg);
-  char buffer[BUFFER_SIZE] = {0};
-
-  size_t valread = 0;
-  size_t toread = sizeof(uint16_t);
-
-  while(valread < toread) {
-    ssize_t bytes_read = read(new_socket, buffer + valread, toread - valread);
-    if (bytes_read < 0) {
-      perror("read failed");
-      close(new_socket);
-      return NULL;
+void push_clients_back_to_queue(Deque *queue, ClientInfo *client[]) {
+  for (int i = 0; i < MAX_PLAYERS; i++) {
+    if (client[i] != NULL) {
+      push_front(queue, client[i]);
     }
-    valread += (size_t)bytes_read;
-  }
-
-  uint16_t header_id;
-  memcpy(&header_id, buffer, sizeof(uint16_t));
-  header_id = ntohs(header_id);
-  int code_req, id, eq;
-  header_id_decode(header_id, &code_req, &id, &eq);
-  printf("Client request: code=%d, id=%d, eq=%d\n", code_req, id, eq);
-
-  char *addr = malloc(sizeof(uint32_t) * 4);
-  memcpy(addr, "ff02::1", strlen("ff02::1") + 1);
-  char *msg = serv_start_request(3, 0, 0, 54321, 8081, addr);
-  free(addr);
-  size_t msg_len = sizeof(uint16_t) * 3 + 4 * sizeof(uint32_t);
-  size_t sent = 0;
-
-  while (sent < msg_len) {
-    ssize_t bytes_sent = send(new_socket, msg + sent, msg_len - sent, 0);
-    if (bytes_sent < 0) {
-      perror("send failed");
-      free(msg);
-      close(new_socket);
-      return NULL;
-    }
-    sent += (size_t)bytes_sent;
-  }
-  pthread_t udp_thread;
-  if (pthread_create(&udp_thread, NULL, server_udp, NULL) != 0) {
-    perror("could not create UDP server thread");
-    return NULL;
-  }
-  close(new_socket);
-  return NULL;
-}
-
-void *server_udp(void *arg) {
-  int * ff = (int *)arg;
-  ff += 1;
-  char *ip = "ff02::1";
-  uint16_t port = 8081;
-  printf("Starting server on %s : %d\n", ip, port);
-  
-  int sockfd = socket(AF_INET6, SOCK_DGRAM, 0);
-  struct sockaddr_in6 addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin6_family = AF_INET6;
-  addr.sin6_port = htons(port);
-  addr.sin6_scope_id = 0;
-  inet_pton(AF_INET6, ip, &(addr.sin6_addr));
-
-  Board boardobj;
-  Board *board = &boardobj;
-  setup_board(board);
-  gen_map(board);
-
-
-  char* rqst = all_board_request(11, 2, 1, 34, board);
-  size_t rqst_len = sizeof(uint16_t) * 2 + sizeof(uint8_t) * ((long unsigned int)(board->h * board->w + 2));
-  size_t sent = 0;
-
-  printf("Board sent = %ld bytes\n", rqst_len);
-
-  while (sent < rqst_len) {
-    ssize_t bytes_sent = sendto(sockfd, rqst + sent, rqst_len - sent, 0, (struct sockaddr *)&addr, sizeof(addr));
-    if (bytes_sent < 0) {
-      perror("sendto failed");
-      free(rqst);
-      close(sockfd);
-      return NULL;
-    }
-    sent += (size_t)bytes_sent;
-  }
-  printf("Board sent total = %ld bytes\n", sent);
-  sleep(3);
-  set_grid(board, 0, 0, 0);
-  set_grid(board, 1, 0, 1);
-  set_grid(board, 2, 0, 0);
-  set_grid(board, 3, 0, 1);
-  set_grid(board, 4, 0, 2);
-  free(rqst);
-  rqst = change_board_request(12, 2, 1, 36, board);
-  rqst_len = 2 * sizeof(uint16_t) + sizeof(uint8_t) * ((size_t)(board->changed_cells_count * 3 + 1));
-  printf("Board sent2 = %ld bytes\n", rqst_len);
-  sent = 0;
-  while (sent < rqst_len) {
-    ssize_t bytes_sent = sendto(sockfd, rqst + sent, rqst_len - sent, 0, (struct sockaddr *)&addr, sizeof(addr));
-    if (bytes_sent < 0) {
-      perror("sendto failed");
-      free(rqst);
-      close(sockfd);
-      return NULL;
-    }
-    sent += (size_t)bytes_sent;
-  }
-  printf("Board sent total2 = %ld bytes\n", sent);
-
-  free(rqst);
-  close(sockfd);
-  return NULL;
-}
-
-int create_server_socket() {
-  int server_fd;
-  if ((server_fd = socket(AF_INET6, SOCK_STREAM, 0)) == 0) {
-    perror("socket failed");
-    exit(EXIT_FAILURE);
-  }
-  return server_fd;
-}
-
-void set_socket_options(int server_fd) {
-  int opt = 1;
-  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt,
-                 sizeof(opt))) {
-    perror("setsockopt failed");
-    exit(EXIT_FAILURE);
-  }
-
-  int no = 0;
-  if (setsockopt(server_fd, IPPROTO_IPV6, IPV6_V6ONLY, (void *)&no,
-                 sizeof(no)) < 0) {
-    perror("setsockopt failed");
-    exit(EXIT_FAILURE);
   }
 }
 
-void bind_and_listen(int server_fd, struct sockaddr_in6 *address) {
-  if (bind(server_fd, (struct sockaddr *)address, sizeof(*address)) < 0) {
-    perror("bind failed");
-    close(server_fd);
-    exit(EXIT_FAILURE);
-  }
-
-  if (listen(server_fd, 3) < 0) {
-    perror("listen failed");
-    close(server_fd);
-    exit(EXIT_FAILURE);
-  }
-}
-
-void accept_connections(int server_fd, struct sockaddr_in6 *address) {
-  int addrlen = sizeof(*address);
-  printf("Server is ready to accept connections\n");
+void *check_queues(void *arg) {
+  (void)arg;
   while (1) {
-    int *new_socket = malloc(sizeof(int));
-    if ((*new_socket = accept(server_fd, (struct sockaddr *)address,
-                              (socklen_t *)&addrlen)) < 0) {
-      perror("accept failed");
-      free(new_socket);
+    process_queue(ffa, &ffa_queue_mutex, &ffa_count_mutex, &ffa_count, 1);
+    process_queue(team, &team_queue_mutex, &team_count_mutex, &team_count, 2);
+    sleep(5);
+  }
+
+  pthread_exit(NULL);
+}
+
+ClientInfo *create_client_info(int client_socket) {
+  // Allocate and initialize client info
+  ClientInfo *client_info = malloc(sizeof(ClientInfo));
+  if (!client_info) {
+    perror("Failed to allocate memory for client info");
+    close(client_socket);
+    pthread_exit(NULL);
+  }
+  client_info->socket = client_socket;
+
+  return client_info;
+}
+
+// function qui ajoute un client à la queue
+void add_client_to_queue(int client_socket, int gamemode) {
+  pthread_mutex_t *count_mutex, *queue_mutex;
+  Deque *queue;
+  int *count;
+
+  // Create client info
+  ClientInfo *client_info = create_client_info(client_socket);
+  client_info->socket = client_socket;
+
+  if (gamemode == 1) {
+    queue_mutex = &ffa_queue_mutex;
+    count_mutex = &ffa_count_mutex;
+    count = &ffa_count;
+    queue = ffa;
+  } else {
+    queue_mutex = &team_queue_mutex;
+    count_mutex = &team_count_mutex;
+    count = &team_count;
+    queue = team;
+  }
+
+  pthread_mutex_lock(queue_mutex);
+  pthread_mutex_lock(count_mutex);
+
+  push_back(queue, client_info);
+  (*count)++;
+
+  pthread_mutex_unlock(count_mutex);
+  pthread_mutex_unlock(queue_mutex);
+  printf("Client connected.\n");
+}
+
+// function who read the gamemode of the client
+int read_client_gamemode(int socket) {
+  char buff[BUFFER_SIZE];
+  uint16_t header_id;
+  Header_info header_info;
+
+  ssize_t rd = read_message(socket, NULL, buff, sizeof(uint16_t), 0);
+
+  if (rd < 0) {
+    perror("read failed");
+    close(socket);
+    return -1;
+  }
+  memcpy(&header_id, buff, sizeof(uint16_t));
+  header_id = ntohs(header_id);
+  header_id_decode(header_id, &header_info.code_req, &header_info.id,
+                   &header_info.eq);
+  return header_info.code_req;
+}
+
+void *init_client(void *arg) {
+  int socket = *(int *)arg;
+
+  // Read client gamemode
+  int rcv_gamemode = read_client_gamemode(socket);
+  if (rcv_gamemode < 0) {
+    pthread_exit(NULL);
+  }
+
+  add_client_to_queue(socket, rcv_gamemode);
+
+  pthread_exit(NULL);
+}
+
+void send_message_to_all(int sock_tcp[], char* rqst, size_t rqst_len) {
+  ssize_t wr = 0;
+  for (int i = 0; i < 4; i++) {
+    wr = send_meessage(sock_tcp[i], NULL, rqst, rqst_len, 0);
+    if (!wr) continue;
+  }
+}
+
+// function who se board to the client
+void send_board(Server_info *server_info, Board *board, int turn, int diff_turn,
+                uint16_t num_request_wr) {
+  ssize_t wr = 0;
+  char *rqst;
+  size_t rqst_len = 0;
+  if (turn % diff_turn == 0) {
+    rqst = all_board_request(11, 0, 0, num_request_wr, board);
+    rqst_len = sizeof(uint16_t) * 2 +
+               sizeof(uint8_t) * ((size_t)(board->h * board->w + 2));
+    wr = send_meessage(server_info->sock_mdff, &server_info->addr_mdff, rqst,
+                       rqst_len, 1);
+    if (wr < 0) {
+      perror("write failed");
+      close(server_info->sock_mdff);
+    }
+    free(rqst);
+  } else {
+    rqst = change_board_request(12, 0, 0, num_request_wr, board);
+    rqst_len = 2 * sizeof(uint16_t) +
+               sizeof(uint8_t) * ((size_t)(board->changed_cells_count * 3 + 1));
+    wr = send_meessage(server_info->sock_mdff, &server_info->addr_mdff, rqst,
+                       rqst_len, 1);
+    if (wr < 0) {
+      perror("write failed");
+      close(server_info->sock_mdff);
+    }
+    free(rqst);
+  }
+}
+
+// function to get all actions from the buffer
+size_t get_all_actions(ssize_t rd, char *buff, Deque **players_actions) {
+  size_t index = 0;
+  while (rd >= (ssize_t)(sizeof(uint32_t))) {
+    uint16_t header_id;
+    uint16_t *action = malloc(sizeof(uint16_t));
+    memcpy(&header_id, buff + index, sizeof(uint16_t));
+    index += sizeof(uint16_t);
+    memcpy(action, buff + index, sizeof(uint16_t));
+    index += sizeof(uint16_t);
+    header_id = ntohs(header_id);
+    *action = ntohs(*action);
+    Header_info header_info;
+    header_id_decode(header_id, &header_info.code_req, &header_info.id,
+                     &header_info.eq);
+    push_front(players_actions[header_info.id], action);
+    rd -= (ssize_t)sizeof(uint32_t);
+  }
+  return index;
+}
+
+// function to perform all actions
+void perform_actions(Deque **players_actions, Player *players, Board *board,
+                     Deque *bombs) {
+  for (int i = 0; i < 4; i++) {
+    Node *node;
+    uint16_t *last_action ;
+    int max_num = -1;
+    int todo = -1;
+    while (players_actions[i]->start) {
+      node = pop_front(players_actions[i]);
+      last_action = (uint16_t *)node->data;
+      int num;
+      int act;
+      action_id_decode(*last_action, &num, &act);
+      free(last_action);
+      if (num > max_num) {
+        max_num = num;
+        todo = act;
+      }
+      free(node);
+    }
+    switch (todo) {
+    case -1: // no action
+      break;
+    case 4:
+      drop_bomb(players + i, board, bombs,
+                init_bomb(copy_pos(players[i].pos), 1, 100));
+      break;
+
+    default:
+      move_player(players + i, todo, board);
+      break;
+    }
+  }
+}
+
+// function check the state of the players
+int check_players_state(Player *players, Deque *bombs, Board *board,
+                        Server_info *server_info, int *nb_alive, int *id_winner,
+                        int *eq_winner, int game_mode) {
+  char *rqst;
+  int *players_hit = reduce_timer(bombs, board, players, 20);
+  if (!players_hit) return 0;
+  for (int i = 0; i < 4; i++) {
+    if (players_hit[i]) {
+      uint16_t header_id = header_id_request(17, 0, 0);
+      header_id = htons(header_id);
+      rqst = malloc(sizeof(uint16_t));
+      memcpy(rqst, &header_id, sizeof(uint16_t));
+      send_meessage(server_info->sock_tcp[i], NULL, rqst, sizeof(uint16_t), 0);
+      free(rqst);
+      players[i].alive = 0;
+      *nb_alive -= 1;
+    }
+  }
+
+  if (*nb_alive == 1 || *nb_alive == 2) {
+    int players_id[2];
+    int index = 0;
+    for (int i = 0; i < 4; i++) {
+      if (players[i].alive) {
+        players_id[index] = i;
+        index++;
+      }
+    }
+    if (*nb_alive == 1) {
+      *id_winner = players_id[0];
+      *eq_winner = players[*id_winner].eq;
+    } else {
+      if (players[players_id[0]].eq == players[players_id[1]].eq &&
+          game_mode == 2) {
+        *id_winner = players_id[0];
+        *eq_winner = players[players_id[0]].eq;
+      } else
+        return 0;
+    }
+    uint16_t header_id = header_id_request(*nb_alive + 14, *id_winner, *eq_winner);
+    rqst = malloc(sizeof(uint16_t));
+    memcpy(rqst, &header_id, sizeof(uint16_t));
+    send_message_to_all(server_info->sock_tcp, rqst, sizeof(uint16_t));
+    free(rqst);
+    return 1;
+  } else return 0;
+
+}
+
+// function to check the chat update
+void check_chat_update(Server_info *server_info, Player *players, fd_set* readfds) {
+  ssize_t flow;
+  char* rqst = NULL;
+  for (int i = 0; i < 4; i++) {
+    char buff[BUFFER_SIZE];
+    if (FD_ISSET(server_info->sock_tcp[i], readfds)) {
+      // recevoir les messages du joueurs
+      flow = read_message(server_info->sock_tcp[i], NULL, buff,
+                        BUFFER_SIZE, 0);
+      if (flow <= 0) continue;
+      
+      uint16_t header_id;
+      Header_info header_info;
+      uint8_t len;
+      size_t rqst_len ;
+      // get header
+      memcpy(&header_id, buff, sizeof(uint16_t));
+      header_id = ntohs(header_id);
+      header_id_decode(header_id, &header_info.code_req, &header_info.id, &header_info.eq);
+      // get len
+      memcpy(&len, buff + sizeof(uint16_t), sizeof(uint8_t));
+      char *message = malloc(sizeof(char) * len);
+      memcpy(message, buff + sizeof(uint16_t) + sizeof(uint8_t),
+             sizeof(char) * len);
+      rqst_len = sizeof(uint16_t) + sizeof(uint8_t) + sizeof(char) * len;
+      if (header_info.code_req == 7) {
+        rqst = tchat_request(13, header_info.id, header_info.eq, len, message);
+        send_message_to_all(server_info->sock_tcp, rqst, rqst_len);        
+      } else {
+        // regarder quel est le destinataire et lui envoyer
+        for (int k = 0; k < 4; k++) {
+          // regarder quel est le destinataire et lui envoyer
+          if (players[k].eq == header_info.eq) {
+            rqst = tchat_request(14, header_info.id, header_info.eq, len, message);
+            flow = send_meessage(server_info->sock_tcp[k], NULL, rqst, rqst_len, 0);
+          }
+        }
+      }
+      free(rqst);
+      free(message);
+    }
+  }
+}
+
+// Function to send multicast information to the clients
+void process_clients(ClientInfo *client[], int gamemode) {
+  Server_info *server_info = malloc(sizeof(Server_info));
+  if (!server_info) {
+    perror("Failed to allocate memory for server info");
+    return;
+  }
+  pthread_mutex_lock(&port_mutex);
+  uint16_t port_mdff = udp_var++;
+  server_info->port_mdff = port_mdff;
+  uint16_t port_udp = udp_var++;
+  server_info->port_udp = port_udp;
+  pthread_mutex_unlock(&port_mutex);
+
+  for (int i = 0; i < 4; i++) {
+    int equipe = (gamemode == 1) ? 0 : (i % 2);
+    int code_req = (gamemode == 1) ? 9 : 10;
+    server_info->sock_tcp[i] = client[i]->socket;
+
+    send_multicast_info(client[i]->socket, code_req, i, equipe, port_udp,
+                        port_mdff);
+    free(client[i]);
+  }
+  pthread_t game_thread;
+  pthread_create(&game_thread, NULL, init_game, server_info);
+  pthread_detach(game_thread);
+}
+
+// function to initialize the game with board and players
+void *init_game(void *arg) {
+  Server_info *server_info = (Server_info *)arg;
+  Player players[4];
+  Board board;
+  Deque *bombs = init_deque();
+  char buff[BUFFER_SIZE];
+  setup_board(&board);
+  Pos pos[4] = {
+      {0, 0}, {board.w - 1, 0}, {0, board.h - 1}, {board.w - 1, board.h - 1}};
+
+  // recep des header
+  uint16_t header_id;
+  for (int i = 0; i < 4; i++) {
+    ssize_t rd = recv(server_info->sock_tcp[i], buff, sizeof(uint16_t), 0);
+    if (rd < 0) {
+      perror("read failed");
+      close(server_info->sock_tcp[i]);
+    }
+    memcpy(&header_id, buff, sizeof(uint16_t));
+    header_id = ntohs(header_id);
+    int id, code_req, eq;
+    header_id_decode(header_id, &code_req, &id, &eq);
+    init_player(players + i, id, eq, pos + i);
+  }
+
+  start_udp_servers(server_info->port_udp, server_info->port_mdff, server_info);
+  gen_map(&board);
+  for (int i = 0; i < 4; i++) {
+    set_grid_cell(&board, players[i].pos->x, players[i].pos->y, (char)i);
+  }
+  game(server_info, &board, players, bombs);
+  free_deque(bombs, free_bomb);
+  for (int i = 0; i < 4; i++) {
+    close(server_info->sock_tcp[i]);
+  }
+  close(server_info->sock_mdff);
+  close(server_info->sock_udp);
+  free(server_info);
+  return NULL;
+}
+
+// game loop
+void game(Server_info *server_info, Board *board, Player *players,
+          Deque *bombs) {
+  // recevoir 4 messages TCP des 4 joueurs pour qu'ils disent qu'ils sont prets
+  int game_mode =
+      players[0].eq || players[1].eq || players[2].eq || players[3].eq;
+  game_mode = game_mode ? 2 : 1;
+  int nb_alive = 4;
+  int turn = 0;
+  int diff_turn = 1000000 / 40;
+  int activity = 0;
+  int id_winner = -1;
+  int eq_winner = -1;
+  uint16_t num_request_wr = 0;
+  Deque **players_actions = malloc(sizeof(Deque *) * 4);
+  for (int i = 0; i < 4; i++) {
+    players_actions[i] = init_deque();
+  }
+  printf("A game has started.\n");
+  while (1) {
+    // envoie de la grille à tous les joueurs
+    send_board(server_info, board, turn, diff_turn, num_request_wr);
+    turn++;
+    num_request_wr = (uint16_t)(num_request_wr + 1) % 65536;
+
+    // reception des requetes
+    fd_set readfds;
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 40;
+
+    FD_ZERO(&readfds);
+    FD_SET(server_info->sock_udp, &readfds);
+    for (int i = 0; i < 4; i++) {
+      FD_SET(server_info->sock_tcp[i], &readfds);
+    }
+
+    activity = select(FD_SETSIZE, &readfds, NULL, NULL, &tv);
+
+    if (!activity) {
+      usleep(40);
       continue;
     }
 
-    pthread_t thread_id;
-    if (pthread_create(&thread_id, NULL, handle_client, (void *)new_socket) !=
-        0) {
-      perror("could not create thread");
-      free(new_socket);
-      continue;
+    // read all received actions
+    if (FD_ISSET(server_info->sock_udp, &readfds)) {
+      // lire les messages UDP
+      char buff[2 * BUFFER_SIZE];
+      ssize_t rd;
+      struct sockaddr_in6 addr_client;
+      rd = read_message(server_info->sock_udp, &addr_client, buff, BUFFER_SIZE,
+                        0);
+
+      // get all actions
+      size_t index = get_all_actions(rd, buff, players_actions);
+      if (!index)
+        goto chat_update;
+
+      // execute all actions
+      perform_actions(players_actions, players, board, bombs);
+
+      // check players state
+      if (check_players_state(players, bombs, board, server_info, &nb_alive,
+                              &id_winner, &eq_winner, game_mode)) break;
     }
-    pthread_detach(thread_id);
+
+  // chat update
+  chat_update:
+    check_chat_update(server_info, players, &readfds);
+    usleep(30);
   }
+
+  // free all players actions
+  for (int i = 0; i < 4; i++) {
+    free_deque(players_actions[i], free);
+  }
+  free(players_actions);
 }
 
 int main() {
-  int server_fd = create_server_socket();
-  set_socket_options(server_fd);
+  pthread_t check_game_modes_thread;
+  int server_socket;
+  socklen_t address_length = sizeof(struct sockaddr_storage);
 
-  struct sockaddr_in6 address;
-  memset(&address, 0, sizeof(address));
-  address.sin6_family = AF_INET6;
-  address.sin6_addr = in6addr_any;
-  address.sin6_port = htons(PORT);
+  ffa = init_deque();
+  team = init_deque();
 
-  bind_and_listen(server_fd, &address);
-  accept_connections(server_fd, &address);
+  // Create server and initialize connection queue
+  __uint16_t port = 8080;
+  server_socket = create_server(port);
+  if (server_socket < 0) {
+    perror("Failed to create server");
+    return EXIT_FAILURE;
+  }
 
-  close(server_fd);
+  printf("Server started, ready to receive connection on port %d\n", port);
+
+  if (pthread_create(&check_game_modes_thread, NULL, check_queues, NULL) != 0) {
+    perror("Failed to create check thread");
+    return EXIT_FAILURE;
+  }
+  // Accept and handle client connections
+  while (1) {
+    int client_socket = accept(server_socket, NULL, &address_length);
+    if (client_socket < 0) {
+      perror("Failed to accept connection");
+      continue;
+    }
+
+    pthread_t client_init_thread;
+    // Create a thread to handle the client connection
+    if (pthread_create(&client_init_thread, NULL, init_client,
+                       &client_socket) != 0) {
+      perror("Failed to create thread");
+      continue;
+    }
+    pthread_detach(client_init_thread);
+  }
+
+  // Close server socket
+  close(server_socket);
+
   return 0;
 }

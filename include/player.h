@@ -4,22 +4,22 @@
 #include "pos.h"
 #include "board.h"
 #include "bomb.h"
-#include "dequeue.h"
+#include "deque.h"
 #include "direction.h"
 
 typedef struct {
     int id;
-    int id_game;
+    int eq;
     Pos* pos;
-    int sockTCP;
+    int alive;
 } Player;
 
-Player* init_player(int id , int id_game , Pos* pos , int sockTCP);
+void init_player(Player *p ,int id, int eq, Pos* pos);
 void free_player(Player* player);
 void move_player (Player* player , int dir , Board* board);
-void drop_bomb(Player* player , Board* board , Dequeue* bombs , Bomb* bomb);
-int* explode_bomb (Bomb* bomb , Board* board , Player* Players[]);
-int* reduce_timer(Dequeue* bombs , Board* board , Player* Players[] , int dt);
-void bombs_in_range(Bomb* bomb , Dequeue* bombs , Dequeue* bombsInRange);
+void drop_bomb(Player* player , Board* board , Deque* bombs , Bomb* bomb);
+int* explode_bomb (Bomb* bomb , Board* board , Player* Players);
+int* reduce_timer(Deque* bombs , Board* board , Player* Players , int dt);
+void bombs_in_range(Bomb* bomb , Deque* bombs , Deque* bombsInRange);
 
 #endif

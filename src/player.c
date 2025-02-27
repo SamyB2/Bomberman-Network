@@ -1,12 +1,10 @@
 #include "../include/player.h"
 
-Player *init_player(int id, int id_game, Pos *pos, int sockTCP) {
-  Player *player = malloc(sizeof(Player));
-  player->id = id;
-  player->id_game = id_game;
-  player->pos = pos;
-  player->sockTCP = sockTCP;
-  return player;
+void init_player(Player *p, int id, int eq, Pos *pos) {
+  p->id = id;
+  p->eq = eq;
+  p->pos = pos;
+  p->alive = 1;
 }
 
 void free_player(Player *player) {
@@ -37,53 +35,55 @@ void move_player(Player *player, int dir, Board *board) {
   }
 }
 
-void drop_bomb(Player *player, Board *board, Dequeue *bombs, Bomb *bomb) {
+// Drop a bomb on the player's position
+void drop_bomb(Player *player, Board *board, Deque *bombs, Bomb *bomb) {
   if (get_grid(board, player->pos->x, player->pos->y) != player->id)
     return;
   push_back(bombs, bomb);
   set_grid(board, bomb->pos->x, bomb->pos->y, (char)('A' + player->id));
 }
 
-int *explode_bomb(Bomb *bomb, Board *board, Player *Players[]) {
+int *explode_bomb(Bomb *bomb, Board *board, Player *Players) {
   int nbPlayers = 4;
   int *playersHit =
-      calloc((size_t)nbPlayers,
-             sizeof(int)); // Use calloc to initialize all elements to 0
+      calloc((size_t)nbPlayers, sizeof(int)); // Initialize all elements to 0
 
-  // check the 8 directions
+  // Check each direction
   for (int i = 0; i < 8; i++) {
     Direction *direction = dir_of(i);
 
-    // check the range of the bomb
+    // Check each point in the bomb's range
     for (int k = 0; k <= bomb->range; k++) {
-      // hitting point
-      int hp_x = bomb->pos->x + direction->coefX * k;
-      int hp_y = bomb->pos->y + direction->coefY * k;
-      
-      // if the point is out of bounds, we stop
-      if (!is_in_bounds(board, hp_x, hp_y))
+      int hitPointX = bomb->pos->x + direction->coefX * k;
+      int hitPointY = bomb->pos->y + direction->coefY * k;
+
+      // If the point is out of bounds, skip to the next point
+      if (!is_in_bounds(board, hitPointX, hitPointY))
         continue;
 
-      int grid_value = get_grid(board, hp_x, hp_y);
-      if (grid_value == D_WALL) {
-        set_grid(board, hp_x, hp_y, PATH);
-      } else if (grid_value >= 0 && grid_value < nbPlayers) {
-        playersHit[grid_value] = 1;
+      int gridValue = get_grid(board, hitPointX, hitPointY);
+      if (gridValue == D_WALL) {
+        set_grid(board, hitPointX, hitPointY, PATH);
+      } else if (gridValue >= 0 && gridValue < nbPlayers) {
+        playersHit[gridValue] = 1;
       }
     }
-    free_dir(direction);
   }
 
-  int bomb_dropper = 'A' - get_grid(board, bomb->pos->x, bomb->pos->y);
-  if (bomb->pos->x == Players[bomb_dropper]->pos->x &&
-      bomb->pos->y == Players[bomb_dropper]->pos->y) {
-    playersHit[bomb_dropper] = 1;
+  int bombDropper = get_grid(board, bomb->pos->x, bomb->pos->y) - 'A';
+  if (bombDropper >= 0 && bombDropper < nbPlayers) {
+      int bombXX = bomb->pos->x;
+      int bombYY = bomb->pos->y;
+      int playerXX = (Players+bombDropper)->pos->x;
+      int playerYY = (Players+bombDropper)->pos->y;
+      if (bombXX == playerXX && bombYY == playerYY)  playersHit[bombDropper] = 1;
   }
   set_grid(board, bomb->pos->x, bomb->pos->y, PATH);
   return playersHit;
 }
 
-void bombs_in_range(Bomb *bomb, Dequeue *bombs, Dequeue *bombsInRange) {
+// Check if the bomb is in range of the other bomb
+void bombs_in_range(Bomb *bomb, Deque *bombs, Deque *bombsInRange) {
   Node *node = bombs->start;
   while (node) {
     Bomb *bomb2 = node->data;
@@ -97,13 +97,14 @@ void bombs_in_range(Bomb *bomb, Dequeue *bombs, Dequeue *bombsInRange) {
   }
 }
 
-int *reduce_timer(Dequeue *bombs, Board *board, Player *Players[], int dt) {
+// Reduce the timer of each bomb and explode the bombs that have a timer <= 0
+int *reduce_timer(Deque *bombs, Board *board, Player *Players, int dt) {
   for (Node *node = bombs->start; node != NULL; node = node->next) {
     Bomb *bomb = node->data;
     bomb->timer -= dt;
   }
 
-  Dequeue *bombsToExplode = init_dequeue();
+  Deque *bombsToExplode = init_deque();
 
   Node *node = bombs->start;
   while (node) {
@@ -143,6 +144,6 @@ int *reduce_timer(Dequeue *bombs, Board *board, Player *Players[], int dt) {
     playersHit = NULL;
   }
 exit:
-  free_dequeue(bombsToExplode, free_bomb);
+  free_deque(bombsToExplode, free_bomb);
   return playersHit;
 }
